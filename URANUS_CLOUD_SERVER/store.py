@@ -9,13 +9,24 @@ from __future__ import annotations
 import hashlib
 import hmac
 import os
+import shutil
 import sqlite3
 import time
 from typing import Any
 
 import jwt  # PyJWT
 
-_DB_PATH = os.path.join(os.path.dirname(__file__), "markets.db")
+_DEFAULT_DB = os.path.join(os.path.dirname(__file__), "markets.db")
+if os.environ.get("VERCEL"):
+    _DB_PATH = "/tmp/markets.db"
+    if not os.path.exists(_DB_PATH) and os.path.exists(_DEFAULT_DB):
+        try:
+            shutil.copy(_DEFAULT_DB, _DB_PATH)
+        except Exception:
+            pass
+else:
+    _DB_PATH = _DEFAULT_DB
+
 JWT_SECRET = os.environ.get("MARKETS_JWT_SECRET", "change-me-in-production")
 TOKEN_HOURS = 24 * 7
 
@@ -27,12 +38,13 @@ def _conn() -> sqlite3.Connection:
 
 
 def init_db() -> None:
-    with _conn() as c:
-        c.executescript("""
-        PRAGMA journal_mode=WAL;
-        CREATE TABLE IF NOT EXISTS users(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT UNIQUE NOT NULL,
+    try:
+        with _conn() as c:
+            c.executescript("""
+            PRAGMA journal_mode=WAL;
+            CREATE TABLE IF NOT EXISTS users(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT UNIQUE NOT NULL,
             pw_hash TEXT NOT NULL,
             created_at TEXT DEFAULT (datetime('now'))
         );
@@ -56,6 +68,8 @@ def init_db() -> None:
             created_at TEXT DEFAULT (datetime('now'))
         );
         """)
+    except Exception:
+        pass
 
 
 # ─────────────────────────────── كلمات المرور ───────────────────────────────

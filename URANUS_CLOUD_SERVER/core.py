@@ -31,7 +31,9 @@ async def shutdown() -> None:
 
 
 def client() -> httpx.AsyncClient:
-    assert _client is not None, "HTTP client not started"
+    global _client
+    if _client is None or _client.is_closed:
+        _client = httpx.AsyncClient(timeout=httpx.Timeout(20.0), headers=UA, follow_redirects=True)
     return _client
 
 
