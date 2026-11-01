@@ -15,10 +15,21 @@ from typing import Any
 import core  # noqa: E402
 
 TV = "https://scanner.tradingview.com"
-BINANCE = "https://api.binance.com"
+BINANCE_HOSTS = ["https://api.binance.us", "https://api.binance.com"]
 ERAPI = "https://open.er-api.com/v6/latest"
 YH_CHART = "https://query1.finance.yahoo.com/v8/finance/chart"
 YH_SEARCH = "https://query1.finance.yahoo.com/v1/finance/search"
+
+
+async def _fetch_binance(path: str, params: dict | None = None) -> Any:
+    for base in BINANCE_HOSTS:
+        try:
+            data = await core.get_json(f"{base}{path}", params=params, source="binance")
+            if data:
+                return data
+        except Exception:
+            continue
+    return None
 
 
 # ══════════════════════════════════════════════ كريبتو ═════════════════════
@@ -37,14 +48,22 @@ def _norm_crypto(d: dict | None, pair: str) -> dict | None:
 
 
 async def crypto_price(pair: str) -> dict | None:
-    pair = pair.upper()
-    key = f"crypto:p:{pair}"
-    data, _ = await core.cached_json(
-        key, core.smart_ttl("crypto"),
-        lambda: core.get_json(f"{BINANCE}/api/v3/ticker/24hr",
-                              params={"symbol": pair}, source="binance"),
-    )
-    return _norm_crypto(data, pair)
+    pair = pair.upper().strip()
+    symbols = [pair]
+    if not any(pair.endswith(q) for q in ["USDT", "USD", "EUR", "FDUSD", "USDC"]):
+        symbols.append(f"{pair}USDT")
+        symbols.append(f"{pair}USD")
+
+    for sym in symbols:
+        key = f"crypto:p:{sym}"
+        data, _ = await core.cached_json(
+            key, core.smart_ttl("crypto"),
+            lambda s=sym: _fetch_binance("/api/v3/ticker/24hr", params={"symbol": s}),
+        )
+        res = _norm_crypto(data, sym)
+        if res:
+            return res
+    return None
 
 
 async def crypto_prices(pairs: list[str]) -> list[dict]:
@@ -59,18 +78,23 @@ async def crypto_prices(pairs: list[str]) -> list[dict]:
 
 
 async def crypto_history(pair: str, interval: str = "1d", limit: int = 48) -> list[dict] | None:
-    pair, limit = pair.upper(), max(1, min(limit, 1000))
-    key = f"crypto:h:{pair}:{interval}:{limit}"
-    data, _ = await core.cached_json(
-        key, 120.0,
-        lambda: core.get_json(f"{BINANCE}/api/v3/klines",
-                              params={"symbol": pair, "interval": interval, "limit": limit},
-                              source="binance"),
-    )
-    if not isinstance(data, list):
-        return None
-    return [{"time": k[0], "open": float(k[1]), "high": float(k[2]),
-             "low": float(k[3]), "close": float(k[4]), "volume": float(k[5])} for k in data]
+    pair, limit = pair.upper().strip(), max(1, min(limit, 1000))
+    symbols = [pair]
+    if not any(pair.endswith(q) for q in ["USDT", "USD", "EUR", "FDUSD", "USDC"]):
+        symbols.append(f"{pair}USDT")
+        symbols.append(f"{pair}USD")
+
+    for sym in symbols:
+        key = f"crypto:h:{sym}:{interval}:{limit}"
+        data, _ = await core.cached_json(
+            key, 120.0,
+            lambda s=sym: _fetch_binance("/api/v3/klines",
+                                         params={"symbol": s, "interval": interval, "limit": limit}),
+        )
+        if isinstance(data, list) and data:
+            return [{"time": k[0], "open": float(k[1]), "high": float(k[2]),
+                     "low": float(k[3]), "close": float(k[4]), "volume": float(k[5])} for k in data]
+    return None
 
 
 async def crypto_search(q: str, limit: int = 8) -> list[dict]:
@@ -80,7 +104,7 @@ async def crypto_search(q: str, limit: int = 8) -> list[dict]:
     key = f"crypto:s:{q}"
     data, _ = await core.cached_json(
         key, 3600.0,
-        lambda: core.get_json(f"{BINANCE}/api/v3/exchangeInfo", source="binance"),
+        lambda: _fetch_binance("/api/v3/exchangeInfo"),
     )
     if not data or not isinstance(data.get("symbols"), list):
         return []
