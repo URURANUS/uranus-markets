@@ -18,6 +18,7 @@ TV = "https://scanner.tradingview.com"
 BINANCE_HOSTS = ["https://api.binance.us", "https://api.binance.com"]
 ERAPI = "https://open.er-api.com/v6/latest"
 YH_CHART = "https://query1.finance.yahoo.com/v8/finance/chart"
+YH_SEARCH = "https://query1.finance.yahoo.com/v1/finance/search"
 
 # ══════════════════════════════════════════════ 1. الكريبتو (Top 50) ═════════
 TOP_50_CRYPTO = [
@@ -557,3 +558,103 @@ async def metal_history(metal: str = "gold", range_: str = "1mo", interval: str 
         "count": hist["count"],
         "candles": hist["candles"]
     }
+
+
+# ══════════════════════════════════════════════ 8. محرك البحث (Search Engine) ═
+async def crypto_search(q: str, limit: int = 10) -> list[dict]:
+    q_clean = q.strip().upper()
+    if not q_clean:
+        return []
+    out = []
+    for c in TOP_50_CRYPTO:
+        if q_clean in c["symbol"] or q_clean in c["name"].upper():
+            out.append({
+                "market": "crypto",
+                "symbol": c["symbol"],
+                "name": c["name"],
+                "rank": c["rank"]
+            })
+            if len(out) >= limit:
+                break
+    return out
+
+
+async def casa_search(q: str, limit: int = 10) -> list[dict]:
+    q_clean = q.strip().upper()
+    if not q_clean:
+        return []
+    stocks = await casa_stocks()
+    out = []
+    for s in stocks:
+        if q_clean in s["symbol"].upper() or q_clean in s["name"].upper():
+            out.append({**s, "market": "casablanca"})
+            if len(out) >= limit:
+                break
+    return out
+
+
+async def stocks_search(q: str, limit: int = 8) -> list[dict]:
+    q_clean = q.strip()
+    if not q_clean:
+        return []
+    key = f"lite:s:{q_clean.lower()}"
+    data = await core.cached_json(
+        key, 1800.0,
+        lambda: core.get_json(YH_SEARCH, params={"q": q_clean, "quotesCount": limit, "newsCount": 0})
+    )
+    if not data or not isinstance(data.get("quotes"), list):
+        return []
+    return [
+        {
+            "market": "stocks",
+            "symbol": x["symbol"],
+            "name": x.get("shortname") or x.get("longname") or x["symbol"],
+            "exchange": x.get("exchDisp") or x.get("exchange") or "US"
+        }
+        for x in data.get("quotes", [])
+        if x.get("quoteType") in ["EQUITY", "ETF"]
+    ][:limit]
+
+
+async def unified_search(q: str, limit: int = 5) -> dict:
+    q_clean = q.strip()
+    if not q_clean:
+        return {"query": q, "total_count": 0, "results": {}}
+
+    import asyncio
+    c_res, casa_res, s_res = await asyncio.gather(
+        crypto_search(q_clean, limit=limit),
+        casa_search(q_clean, limit=limit),
+        stocks_search(q_clean, limit=limit),
+        return_exceptions=True
+    )
+
+    c_list = c_res if isinstance(c_res, list) else []
+    casa_list = casa_res if isinstance(casa_res, list) else []
+    s_list = s_res if isinstance(s_res, list) else []
+
+    q_up = q_clean.upper()
+    curr_list = []
+    for curr in LITE_CURRENCIES:
+        if q_up in curr["code"] or q_clean in curr["name_ar"] or q_clean.lower() in curr["name_en"].lower():
+            curr_list.append({"market": "forex", "symbol": curr["code"], "name": curr["name_ar"], "flag": curr["flag"]})
+
+    metal_list = []
+    if any(k in q_clean.lower() or k in q_clean for k in ["gold", "ذهب", "xau", "أونصة"]):
+        metal_list.append({"market": "metals", "symbol": "GOLD", "name": "الذهب (Gold)", "unit": "ounce"})
+    if any(k in q_clean.lower() or k in q_clean for k in ["silver", "فضة", "xag"]):
+        metal_list.append({"market": "metals", "symbol": "SILVER", "name": "الفضة (Silver)", "unit": "ounce"})
+
+    total = len(c_list) + len(casa_list) + len(s_list) + len(curr_list) + len(metal_list)
+    return {
+        "query": q,
+        "total_count": total,
+        "results": {
+            "crypto": c_list,
+            "casablanca": casa_list,
+            "stocks": s_list,
+            "currencies": curr_list,
+            "metals": metal_list
+        }
+    }
+

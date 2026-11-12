@@ -53,6 +53,7 @@ async def root():
         "type": "Lite Edition with Full Charts & History",
         "docs": "/docs",
         "sections": {
+            "search": ["/search?q={query}", "/crypto/search?q={query}", "/casablanca/search?q={query}", "/stocks/search?q={query}"],
             "crypto": ["/crypto/top50", "/crypto/price/{symbol}", "/crypto/history/{symbol}"],
             "exchanges": ["/exchanges", "/exchange/{slug}/stocks", "/casablanca/stocks", "/casablanca/price/{symbol}", "/casablanca/history/{symbol}"],
             "indices": ["/indices", "/indices/history/{slug}"],
@@ -227,6 +228,34 @@ async def metal_history(metal: str, range: str = Query("1mo"), interval: str = Q
     if not hist:
         raise HTTPException(404, "المعدن غير صحيح (اختر gold أو silver)")
     return hist
+
+
+# ══════════════════════════════════════════════ 8. محرك البحث (Search Engine) ═
+@app.get("/search")
+async def unified_search_endpoint(q: str = Query(min_length=1, description="كلمة البحث")):
+    """بحث موحد وشامل في كل الأسواق (كريبتو، أسهم كازا، أسهم عالمية، عملات، ذهب وفضة)."""
+    return await M.unified_search(q)
+
+
+@app.get("/crypto/search")
+async def crypto_search_endpoint(q: str = Query(min_length=1)):
+    """بحث داخل أهم 50 عملة كريبتو (بالاسم أو الرمز مثل BTC, Solana)."""
+    results = await M.crypto_search(q)
+    return {"query": q, "count": len(results), "results": results}
+
+
+@app.get("/casablanca/search")
+async def casa_search_endpoint(q: str = Query(min_length=1)):
+    """بحث داخل أسهم بورصة الدار البيضاء (بالاسم أو الرمز مثل ATW, الضحى)."""
+    results = await M.casa_search(q)
+    return {"query": q, "count": len(results), "results": results}
+
+
+@app.get("/stocks/search")
+async def stocks_search_endpoint(q: str = Query(min_length=1)):
+    """بحث داخل الأسهم الأمريكية والعالمية (مثل Apple, Tesla, Nvidia)."""
+    results = await M.stocks_search(q)
+    return {"query": q, "count": len(results), "results": results}
 
 
 if __name__ == "__main__":
