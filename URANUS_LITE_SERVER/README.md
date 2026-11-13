@@ -1,4 +1,4 @@
-# ⚡ URANUS MARKETS LITE API (v1.1.0)
+# ⚡ URANUS MARKETS LITE API (v1.2.0)
 
 النسخة الخفيفة، فائقة السرعة والمخصصة للتطبيقات المالية. تركز حصرياً على الأسواق الأساسية المنتقاة مع توفير البيانات الحية والرسوم البيانية (Charts & History) لكل سوق.
 
@@ -52,14 +52,19 @@
 | | `GET /casablanca/history/{symbol}` | نقاط الرسم البياني لأسهم كازا (`days=30`) |
 | **المؤشرات** | `GET /indices` | أسعار وتغيرات المؤشرات الـ 12 الرسمية للبورصات المنتقاة |
 | | `GET /indices/history/{slug}` | شارت تاريخي لأي مؤشر (`sp500`, `masi`, `cac40`, `dax`...) |
-| **الأسهم** | `GET /stocks/history/{symbol}` | شموع تاريخية لأي سهم أمريكي/كندي/أوروبي للشارت |
-| **العملات** | `GET /fx/rates` | أسعار أهم 10 عملات مقابل الدرهم المغربي |
-| | `GET /fx/convert` | تحويل مباشر بين العملات (`from_c=USD&to_c=MAD&amount=100`) |
-| | `GET /fx/history` | **شارت تاريخ سعر الصرف** (`from_c=USD&to_c=MAD&range=1mo`) |
-| **المعادن** | `GET /metals` | أسعار الذهب والفضة (أونصة وجرامات 24/21/18 بالدولار والدرهم) |
-| | `GET /metals/gold` | سعر الذهب فقط بالتفصيل |
-| | `GET /metals/silver` | سعر الفضة فقط بالتفصيل |
+| **الأسهم** | `GET /stocks/price/{symbol}` | السعر اللحظي لأي سهم أمريكي/كندي/أوروبي (`AAPL`, `TSLA`, `MC.PA`) |
+| | `GET /stocks/history/{symbol}` | شموع تاريخية لأي سهم أمريكي/كندي/أوروبي للشارت |
+| **العملات** | `GET /fx/rates?base=MAD` | أسعار أهم 11 عملة مقابل أي عملة أساس (`MAD`, `EUR`, `USD`...) |
+| | `GET /fx/rates/{base}` | جدول أسعار العملات مقابل عملة أساس في المسار (`/fx/rates/EUR`) |
+| | `GET /fx/convert` | تحويل مباشر بين العملات (`from=USD&to=MAD&amount=100` أو `from_c`/`to_c`) |
+| | `GET /fx/history` | **شارت تاريخ سعر الصرف** (`from=USD&to=MAD&range=1mo`) |
+| | `GET /fx/rate-on-date` | **سعر الصرف في تاريخ محدد** لتسجيل الفواتير القديمة (`date=YYYY-MM-DD`) |
+| **المعادن** | `GET /metals?currency=MAD` | أسعار الذهب والفضة الحية بالأونصة والجرام بالدولار وبأي عملة |
+| | `GET /metals/gold?currency=MAD` | سعر الذهب فقط بالتفصيل |
+| | `GET /metals/silver?currency=MAD` | سعر الفضة الحي فقط بالتفصيل |
 | | `GET /metals/history/{metal}` | **شارت تاريخ الذهب أو الفضة** بالشموع (`metal=gold`) |
+| **تطبيق النفقات** | `GET /sync/rates?base=MAD` | **حزمة مزامنة مضغوطة (~1 KB)** لتخزين العملات والمعادن محلياً (Offline) |
+| | `POST /portfolio/value` | **حساب صافي قيمة المحفظة والأصول** بعملة المستخدم بدون حفظ أي بيانات |
 
 ---
 

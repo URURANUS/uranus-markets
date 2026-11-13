@@ -7,18 +7,38 @@ markets.py — النسخة المخففة (URANUS LITE):
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 import core
 
 TV = "https://scanner.tradingview.com"
 BINANCE_HOSTS = ["https://api.binance.us", "https://api.binance.com"]
+KUCOIN_API = "https://api.kucoin.com/api/v1/market"
+COINGECKO_SIMPLE = "https://api.coingecko.com/api/v3/simple/price"
 ERAPI = "https://open.er-api.com/v6/latest"
 YH_CHART = "https://query1.finance.yahoo.com/v8/finance/chart"
 YH_SEARCH = "https://query1.finance.yahoo.com/v1/finance/search"
+
+# خريطة CoinGecko الاحتياطية للعملات التي قد لا تتوفر على Binance US
+COINGECKO_IDS = {
+    "BTC": "bitcoin", "ETH": "ethereum", "SOL": "solana", "BNB": "binancecoin",
+    "XRP": "ripple", "DOGE": "dogecoin", "ADA": "cardano", "AVAX": "avalanche-2",
+    "LINK": "chainlink", "SUI": "sui", "SHIB": "shiba-inu", "DOT": "polkadot",
+    "LTC": "litecoin", "BCH": "bitcoin-cash", "NEAR": "near", "UNI": "uniswap",
+    "PEPE": "pepe", "APT": "aptos", "ICP": "internet-computer", "RENDER": "render-token",
+    "FET": "fetch-ai", "POL": "polygon-ecosystem-token", "KAS": "kaspa", "TIA": "celestia",
+    "ARB": "arbitrum", "OP": "optimism", "XLM": "stellar", "FIL": "filecoin",
+    "INJ": "injective-protocol", "AAVE": "aave", "STX": "blockstack", "TAO": "bittensor",
+    "FTM": "fantom", "VET": "vechain", "MKR": "maker", "GRT": "the-graph",
+    "RUNE": "thorchain", "ALGO": "algorand", "THETA": "theta-token", "SEI": "sei-network",
+    "JUP": "jupiter-exchange-solana", "FLOKI": "floki", "BONK": "bonk", "GALA": "gala",
+    "BEAM": "beam-2", "WIF": "dogwifcoin", "ENA": "ethena", "CRV": "curve-dao-token",
+    "PENDLE": "pendle", "ONDO": "ondo-finance",
+}
 
 # ══════════════════════════════════════════════ 1. الكريبتو (Top 50) ═════════
 TOP_50_CRYPTO = [
@@ -102,6 +122,60 @@ def _norm_crypto(d: dict | None, pair: str, name: str | None = None) -> dict | N
     }
 
 
+async def _kucoin_all_tickers() -> dict[str, dict]:
+    """جلب أسعار KuCoin كاحتياط للعملات غير المدرجة في Binance US."""
+    async def fetch():
+        data = await core.get_json(f"{KUCOIN_API}/allTickers")
+        tickers = (data or {}).get("data", {}).get("ticker", [])
+        out: dict[str, dict] = {}
+        for t in tickers:
+            sym = t.get("symbol", "")
+            if sym.endswith("-USDT"):
+                base = sym[:-5]
+                last = t.get("last")
+                if last:
+                    out[base] = {
+                        "lastPrice": last,
+                        "priceChangePercent": float(t.get("changeRate") or 0) * 100.0,
+                        "highPrice": t.get("high") or 0,
+                        "lowPrice": t.get("low") or 0,
+                        "volume": t.get("vol") or 0,
+                    }
+        return out
+    return await core.cached_json("lite:kucoin:all", 15.0, fetch) or {}
+
+
+async def _coingecko_prices(symbols: list[str]) -> dict[str, dict]:
+    """جلب الأسعار من CoinGecko دفعة واحدة لأي عملة غير متوفرة في Binance و KuCoin."""
+    id_map = {s: COINGECKO_IDS[s] for s in symbols if s in COINGECKO_IDS}
+    if not id_map:
+        return {}
+    ids_str = ",".join(sorted(set(id_map.values())))
+    key = f"lite:cg:batch:{ids_str}"
+
+    async def fetch():
+        data = await core.get_json(
+            COINGECKO_SIMPLE,
+            params={"ids": ids_str, "vs_currencies": "usd", "include_24hr_change": "true"},
+        )
+        if not isinstance(data, dict):
+            return {}
+        out: dict[str, dict] = {}
+        for sym, cid in id_map.items():
+            row = data.get(cid)
+            if row and row.get("usd") is not None:
+                out[sym] = {
+                    "lastPrice": row["usd"],
+                    "priceChangePercent": row.get("usd_24h_change") or 0.0,
+                    "highPrice": 0,
+                    "lowPrice": 0,
+                    "volume": 0,
+                }
+        return out
+
+    return await core.cached_json(key, 60.0, fetch) or {}
+
+
 async def crypto_price(pair: str) -> dict | None:
     pair = pair.upper().strip()
     symbols = [pair]
@@ -118,42 +192,73 @@ async def crypto_price(pair: str) -> dict | None:
         res = _norm_crypto(data, sym)
         if res:
             return res
+
+    base = pair
+    for q in ["USDT", "USD", "EUR"]:
+        if base.endswith(q) and len(base) > len(q):
+            base = base[:-len(q)]
+            break
+
+    kc_map = await _kucoin_all_tickers()
+    if base in kc_map:
+        res = _norm_crypto(kc_map[base], f"{base}USDT", base)
+        if res:
+            return res
+
+    cg_map = await _coingecko_prices([base])
+    if base in cg_map:
+        return _norm_crypto(cg_map[base], f"{base}USDT", base)
     return None
 
 
 async def crypto_top50() -> list[dict]:
-    """قائمة الـ 50 عملة كاملة مع الأسعار والتغيرات اللحظية بطلب واحد."""
-    key = "lite:crypto:top50:v2"
+    """قائمة الـ 50 عملة كاملة مع الأسعار والتغيرات اللحظية مع احتياط KuCoin و CoinGecko."""
+    key = "lite:crypto:top50:v3"
     cached = core.CACHE.get(key)
     if cached:
         return cached
 
-    all_tickers = await _fetch_binance("/api/v3/ticker/24hr")
+    all_tickers, kc_map = await asyncio.gather(
+        _fetch_binance("/api/v3/ticker/24hr"),
+        _kucoin_all_tickers(),
+        return_exceptions=True,
+    )
+    if isinstance(kc_map, Exception) or not isinstance(kc_map, dict):
+        kc_map = {}
+
     ticker_map = {}
     if isinstance(all_tickers, list):
         for t in all_tickers:
             sym = t.get("symbol", "")
             ticker_map[sym] = t
 
+    missing_syms = []
+    for item in TOP_50_CRYPTO:
+        sym = item["symbol"]
+        if not (ticker_map.get(f"{sym}USDT") or ticker_map.get(f"{sym}USD") or kc_map.get(sym)):
+            missing_syms.append(sym)
+
+    cg_map = await _coingecko_prices(missing_syms) if missing_syms else {}
+
     results = []
     for item in TOP_50_CRYPTO:
         sym = item["symbol"]
-        raw = ticker_map.get(f"{sym}USDT") or ticker_map.get(f"{sym}USD")
+        raw = ticker_map.get(f"{sym}USDT") or ticker_map.get(f"{sym}USD") or kc_map.get(sym) or cg_map.get(sym)
         if raw:
             norm = _norm_crypto(raw, sym, item["name"])
             if norm:
                 norm["rank"] = item["rank"]
                 results.append(norm)
-        else:
-            results.append({
-                "rank": item["rank"],
-                "market": "crypto",
-                "symbol": sym,
-                "name": item["name"],
-                "price": 0.0,
-                "change_percent": 0.0,
-                "currency": "USD"
-            })
+                continue
+        results.append({
+            "rank": item["rank"],
+            "market": "crypto",
+            "symbol": sym,
+            "name": item["name"],
+            "price": 0.0,
+            "change_percent": 0.0,
+            "currency": "USD"
+        })
 
     core.CACHE.set(key, results, 5.0)
     return results
@@ -295,6 +400,43 @@ async def casa_stock_history(symbol: str, days: int = 30) -> dict | None:
 
 
 # ══════════════════════════════════════════════ 4. الأسهم وتاريخ الشموع ══════
+async def _yahoo_quote(symbol: str, ttl: float = 120.0) -> dict | None:
+    """جلب السعر اللحظي ومعلومات السهم أو العقود من Yahoo Finance."""
+    symbol = symbol.upper().strip()
+    key = f"lite:yq:{symbol}"
+    data = await core.cached_json(
+        key, ttl,
+        lambda s=symbol: core.get_json(f"{YH_CHART}/{s}", params={"range": "5d", "interval": "1d"}),
+    )
+    try:
+        meta = data["chart"]["result"][0]["meta"]
+        price = meta.get("regularMarketPrice")
+        if price is None:
+            return None
+        prev = meta.get("chartPreviousClose") or meta.get("previousClose")
+        change = (price - prev) if prev else 0.0
+        chg_pct = ((change / prev) * 100.0) if prev else 0.0
+        return {
+            "market": "stocks",
+            "symbol": symbol,
+            "name": meta.get("shortName") or meta.get("longName") or symbol,
+            "price": round(float(price), 4),
+            "previous_close": round(float(prev), 4) if prev else None,
+            "change": round(float(change), 4),
+            "change_percent": round(float(chg_pct), 2),
+            "currency": meta.get("currency", "USD"),
+            "exchange": meta.get("fullExchangeName") or meta.get("exchangeName"),
+            "market_state": meta.get("marketState"),
+        }
+    except Exception:
+        return None
+
+
+async def stock_price(symbol: str) -> dict | None:
+    """السعر اللحظي لأي سهم أمريكي أو كندي أو أوروبي (مثل AAPL, TSLA, MC.PA)."""
+    return await _yahoo_quote(symbol, ttl=core.smart_ttl("stock"))
+
+
 async def stock_history(symbol: str, range_: str = "1mo", interval: str = "1d") -> dict | None:
     symbol = symbol.upper().strip()
     key = f"lite:sh:{symbol}:{range_}:{interval}"
@@ -397,11 +539,14 @@ LITE_CURRENCIES = [
 ]
 
 
-async def fx_rates() -> dict:
-    key = "lite:fx:mad"
-    data = await core.cached_json(key, 3600.0 * 2, lambda: core.get_json(f"{ERAPI}/MAD"))
+async def fx_rates(base: str = "MAD") -> dict | None:
+    base = (base or "MAD").upper().strip()
+    key = f"lite:fx:base:{base}"
+    data = await core.cached_json(key, 3600.0 * 2, lambda b=base: core.get_json(f"{ERAPI}/{b}"))
     if not data or not data.get("rates"):
-        return {"base": "MAD", "currencies": []}
+        if base == "MAD":
+            return {"base": "MAD", "count": 0, "currencies": []}
+        return None
 
     rates = data["rates"]
     currencies = []
@@ -414,13 +559,21 @@ async def fx_rates() -> dict:
                 **c,
                 "rate": r,
                 "inverse_rate": inv,
-                "rate_text": f"1 MAD = {r} {code}" if code != "MAD" else "1 MAD = 1.0 MAD",
+                "rate_text": f"1 {base} = {r} {code}" if code != base else f"1 {base} = 1.0 {base}",
             })
-    return {"base": "MAD", "count": len(currencies), "currencies": currencies}
+    return {"base": base, "count": len(currencies), "currencies": currencies}
 
 
 async def fx_convert(from_c: str, to_c: str, amount: float = 1.0) -> dict | None:
     from_c, to_c = from_c.upper().strip(), to_c.upper().strip()
+    if from_c == to_c:
+        return {
+            "from": from_c,
+            "to": to_c,
+            "amount": amount,
+            "rate": 1.0,
+            "result": round(amount, 4),
+        }
     key = f"lite:fx:c:{from_c}"
     data = await core.cached_json(key, 3600.0 * 2, lambda: core.get_json(f"{ERAPI}/{from_c}"))
     if not data or not data.get("rates"):
@@ -435,6 +588,71 @@ async def fx_convert(from_c: str, to_c: str, amount: float = 1.0) -> dict | None
         "amount": amount,
         "rate": rate,
         "result": round(amount * rate, 4),
+    }
+
+
+async def fx_rate_on_date(from_c: str, to_c: str, date_str: str, amount: float = 1.0) -> dict | None:
+    """جلب سعر الصرف التاريخي ليوم محدد (مفيد لتسجيل الفواتير القديمة في تطبيق النفقات)."""
+    from_c, to_c = from_c.upper().strip(), to_c.upper().strip()
+    target_dt = datetime.strptime(date_str.strip(), "%Y-%m-%d")
+    if from_c == to_c:
+        return {
+            "from": from_c,
+            "to": to_c,
+            "requested_date": date_str,
+            "effective_date": date_str,
+            "amount": amount,
+            "rate": 1.0,
+            "result": round(amount, 4),
+            "is_exact_date": True,
+        }
+
+    key = f"lite:fx:on_date:{from_c}:{to_c}:{date_str}"
+
+    async def fetch_rate():
+        p1 = int((target_dt - timedelta(days=7)).timestamp())
+        p2 = int((target_dt + timedelta(days=2)).timestamp())
+        params = {"period1": p1, "period2": p2, "interval": "1d"}
+        data = await core.get_json(f"{YH_CHART}/{from_c}{to_c}=X", params=params)
+        invert = False
+        if not data or not data.get("chart", {}).get("result"):
+            data = await core.get_json(f"{YH_CHART}/{to_c}{from_c}=X", params=params)
+            invert = True
+        if not data or not data.get("chart", {}).get("result"):
+            return None
+
+        res = data["chart"]["result"][0]
+        timestamps = res.get("timestamp", [])
+        closes = res.get("indicators", {}).get("quote", [{}])[0].get("close", [])
+
+        candidates = []
+        for t, c in zip(timestamps, closes):
+            if c is not None and c > 0:
+                val = round(1.0 / c, 6) if invert else round(float(c), 6)
+                d_str = datetime.utcfromtimestamp(t).strftime("%Y-%m-%d")
+                candidates.append((d_str, val))
+
+        if not candidates:
+            return None
+
+        prior = [item for item in candidates if item[0] <= date_str]
+        eff_date, rate = prior[-1] if prior else candidates[0]
+        return {"effective_date": eff_date, "rate": rate}
+
+    cached = await core.cached_json(key, 3600.0 * 24, fetch_rate)
+    if not cached:
+        return None
+    rate = cached["rate"]
+    eff_date = cached["effective_date"]
+    return {
+        "from": from_c,
+        "to": to_c,
+        "requested_date": date_str,
+        "effective_date": eff_date,
+        "amount": amount,
+        "rate": rate,
+        "result": round(amount * rate, 4),
+        "is_exact_date": eff_date == date_str,
     }
 
 
@@ -481,62 +699,89 @@ async def fx_history(from_c: str = "USD", to_c: str = "MAD", range_str: str = "1
 
 
 # ══════════════════════════════════════════════ 7. الذهب والفضة وتاريخهما ═══
-async def precious_metals() -> dict:
+async def precious_metals(currency: str = "MAD") -> dict | None:
     OUNCE_TO_GRAM = 31.1034768
+    cur = (currency or "MAD").upper().strip()
 
-    fx = await fx_rates()
-    usd_rate = 9.85
-    for c in fx.get("currencies", []):
-        if c["code"] == "USD":
-            usd_rate = c["inverse_rate"]
-            break
+    tasks = [
+        fx_convert("USD", "MAD"),
+        fx_convert("USD", cur) if cur != "MAD" else asyncio.sleep(0, result=None),
+        crypto_price("PAXGUSDT"),
+        _yahoo_quote("GC=F", 120.0),
+        _yahoo_quote("SI=F", 120.0),
+    ]
+    fx_mad, fx_cur, paxg, gc_q, si_q = await asyncio.gather(*tasks, return_exceptions=True)
 
-    paxg = await crypto_price("PAXGUSDT")
-    gold_usd = paxg["price"] if paxg else 3899.0
-    gold_change = paxg["change_percent"] if paxg else 0.12
+    usd_mad_rate = fx_mad["rate"] if isinstance(fx_mad, dict) and fx_mad.get("rate") else 9.85
+    if cur == "MAD":
+        usd_cur_rate = usd_mad_rate
+    elif isinstance(fx_cur, dict) and fx_cur.get("rate"):
+        usd_cur_rate = fx_cur["rate"]
+    else:
+        return None
 
-    ag_data = await _fetch_binance("/api/v3/ticker/24hr", params={"symbol": "XAGUSDT"})
-    silver_usd = float(ag_data["lastPrice"]) if ag_data and ag_data.get("lastPrice") else 32.50
-    silver_change = float(ag_data.get("priceChangePercent") or 0.0) if ag_data else 0.0
+    if isinstance(paxg, dict) and paxg.get("price"):
+        gold_usd = paxg["price"]
+        gold_change = paxg["change_percent"]
+    elif isinstance(gc_q, dict) and gc_q.get("price"):
+        gold_usd = gc_q["price"]
+        gold_change = gc_q["change_percent"]
+    else:
+        gold_usd, gold_change = 3899.0, 0.0
 
-    gold_gram_24k_usd = round(gold_usd / OUNCE_TO_GRAM, 2)
-    gold_gram_21k_usd = round(gold_gram_24k_usd * (21 / 24), 2)
-    gold_gram_18k_usd = round(gold_gram_24k_usd * (18 / 24), 2)
+    if isinstance(si_q, dict) and si_q.get("price"):
+        silver_usd = si_q["price"]
+        silver_change = si_q["change_percent"]
+    else:
+        ag_data = await _fetch_binance("/api/v3/ticker/24hr", params={"symbol": "XAGUSDT"})
+        silver_usd = float(ag_data["lastPrice"]) if ag_data and ag_data.get("lastPrice") else 32.50
+        silver_change = float(ag_data.get("priceChangePercent") or 0.0) if ag_data else 0.0
 
-    gold_ounce_mad = round(gold_usd * usd_rate, 2)
-    gold_gram_24k_mad = round(gold_gram_24k_usd * usd_rate, 2)
-    gold_gram_21k_mad = round(gold_gram_21k_usd * usd_rate, 2)
-    gold_gram_18k_mad = round(gold_gram_18k_usd * usd_rate, 2)
+    cur_key = cur.lower()
 
-    silver_gram_usd = round(silver_usd / OUNCE_TO_GRAM, 2)
-    silver_ounce_mad = round(silver_usd * usd_rate, 2)
-    silver_gram_mad = round(silver_gram_usd * usd_rate, 2)
+    def _gram_entry(usd_val: float) -> dict:
+        entry = {
+            "usd": round(usd_val, 2),
+            "mad": round(usd_val * usd_mad_rate, 2),
+            "local": round(usd_val * usd_cur_rate, 2),
+        }
+        entry[cur_key] = entry["local"]
+        return entry
+
+    gold_g24 = gold_usd / OUNCE_TO_GRAM
+    gold_g21 = gold_g24 * (21 / 24)
+    gold_g18 = gold_g24 * (18 / 24)
+    silver_g = silver_usd / OUNCE_TO_GRAM
 
     return {
+        "currency": cur,
         "metals": {
             "gold": {
                 "name": "الذهب (Gold)",
-                "unit_ounce_usd": gold_usd,
-                "unit_ounce_mad": gold_ounce_mad,
+                "unit_ounce_usd": round(gold_usd, 2),
+                "unit_ounce_mad": round(gold_usd * usd_mad_rate, 2),
+                "unit_ounce_local": round(gold_usd * usd_cur_rate, 2),
                 "change_percent": gold_change,
                 "grams": {
-                    "24k": {"usd": gold_gram_24k_usd, "mad": gold_gram_24k_mad},
-                    "21k": {"usd": gold_gram_21k_usd, "mad": gold_gram_21k_mad},
-                    "18k": {"usd": gold_gram_18k_usd, "mad": gold_gram_18k_mad},
-                }
+                    "24k": _gram_entry(gold_g24),
+                    "21k": _gram_entry(gold_g21),
+                    "18k": _gram_entry(gold_g18),
+                },
             },
             "silver": {
                 "name": "الفضة (Silver)",
-                "unit_ounce_usd": silver_usd,
-                "unit_ounce_mad": silver_ounce_mad,
+                "unit_ounce_usd": round(silver_usd, 2),
+                "unit_ounce_mad": round(silver_usd * usd_mad_rate, 2),
+                "unit_ounce_local": round(silver_usd * usd_cur_rate, 2),
                 "change_percent": silver_change,
                 "grams": {
-                    "pure_999": {"usd": silver_gram_usd, "mad": silver_gram_mad}
-                }
-            }
+                    "pure_999": _gram_entry(silver_g),
+                },
+            },
         },
-        "usd_to_mad_rate": usd_rate,
-        "updated_at": datetime.utcnow().isoformat()
+        "usd_to_mad_rate": usd_mad_rate,
+        "usd_to_currency_rate": usd_cur_rate,
+        "updated_at": datetime.utcnow().isoformat(),
     }
 
 
@@ -657,4 +902,179 @@ async def unified_search(q: str, limit: int = 5) -> dict:
             "metals": metal_list
         }
     }
+
+
+# ══════════════════════════════════════════════ 9. المزامنة والمحفظة (لتطبيق النفقات) ═══
+async def sync_rates(base: str = "MAD") -> dict | None:
+    """حزمة خفيفة ومضغوطة للمزامنة المحلية (Offline Cache) في تطبيق الأندرويد."""
+    base_code = (base or "MAD").upper().strip()
+    fx, metals = await asyncio.gather(
+        fx_rates(base_code),
+        precious_metals(base_code),
+    )
+    if not fx or not metals:
+        return None
+
+    currencies_compact = {
+        c["code"]: {
+            "rate": c["rate"],
+            "to_base": c["inverse_rate"],
+        }
+        for c in fx.get("currencies", [])
+    }
+    gold = metals["metals"]["gold"]
+    silver = metals["metals"]["silver"]
+    return {
+        "base": base_code,
+        "currencies": currencies_compact,
+        "metals": {
+            "gold": {
+                "ounce_usd": gold["unit_ounce_usd"],
+                "ounce_base": gold["unit_ounce_local"],
+                "gram_24k_base": gold["grams"]["24k"]["local"],
+                "gram_21k_base": gold["grams"]["21k"]["local"],
+                "gram_18k_base": gold["grams"]["18k"]["local"],
+                "change_percent": gold["change_percent"],
+            },
+            "silver": {
+                "ounce_usd": silver["unit_ounce_usd"],
+                "ounce_base": silver["unit_ounce_local"],
+                "gram_999_base": silver["grams"]["pure_999"]["local"],
+                "change_percent": silver["change_percent"],
+            },
+        },
+        "updated_at": datetime.utcnow().isoformat(),
+        "ttl_seconds": 300,
+    }
+
+
+async def portfolio_value(target_currency: str = "MAD", items: list[dict] | None = None) -> dict | None:
+    """حساب صافي قيمة المحفظة والأصول بدون حفظ أي بيانات على السيرفر (Stateless)."""
+    target = (target_currency or "MAD").upper().strip()
+    items = items or []
+
+    # التحقق من العملة الهدف وجلب المعادن والـ FX المطلوبين بالتوازي
+    fx_target = await fx_convert("USD", target)
+    if not fx_target and target != "USD":
+        return None
+
+    has_metal = any((it.get("type") or "").lower().strip() == "metal" for it in items)
+    metals_data = await precious_metals(target) if has_metal else None
+
+    fx_cache: dict[str, float] = {target: 1.0}
+
+    async def _rate_to_target(src_currency: str) -> float | None:
+        src = (src_currency or target).upper().strip()
+        if src in fx_cache:
+            return fx_cache[src]
+        conv = await fx_convert(src, target, 1.0)
+        if not conv:
+            return None
+        fx_cache[src] = conv["rate"]
+        return conv["rate"]
+
+    async def _eval_item(it: dict) -> dict:
+        kind = (it.get("type") or "").lower().strip()
+        sym = (it.get("symbol") or "").upper().strip()
+        amount = float(it.get("amount") or 0.0)
+        label = it.get("label")
+        entry_base = {"type": kind, "symbol": sym, "amount": amount}
+        if label:
+            entry_base["label"] = label
+
+        try:
+            if kind == "currency":
+                rate = await _rate_to_target(sym)
+                if rate is None:
+                    return {**entry_base, "status": "error", "error": f"عملة غير مدعومة: {sym}", "value_in_target": 0.0}
+                val = round(amount * rate, 2)
+                return {**entry_base, "unit_price_in_target": round(rate, 4), "value_in_target": val, "status": "ok"}
+
+            if kind == "metal":
+                m_key = "silver" if sym in ("SILVER", "XAG", "فضة") else "gold"
+                unit = (it.get("unit") or "gram").lower().strip()
+                karat = (it.get("karat") or ("pure_999" if m_key == "silver" else "24k")).lower().strip()
+                m_obj = metals_data["metals"][m_key]
+                if unit == "ounce":
+                    unit_price = m_obj["unit_ounce_local"]
+                else:
+                    grams = m_obj["grams"]
+                    if karat not in grams:
+                        karat = "pure_999" if m_key == "silver" else "24k"
+                    unit_price = grams[karat]["local"]
+                val = round(amount * unit_price, 2)
+                return {
+                    **entry_base,
+                    "metal": m_key,
+                    "unit": unit,
+                    "karat": karat if unit != "ounce" else "ounce",
+                    "unit_price_in_target": round(unit_price, 2),
+                    "value_in_target": val,
+                    "status": "ok",
+                }
+
+            if kind == "crypto":
+                q = await crypto_price(sym)
+                if not q:
+                    return {**entry_base, "status": "error", "error": f"عملة مشفرة غير موجودة: {sym}", "value_in_target": 0.0}
+                rate = await _rate_to_target(q.get("currency", "USD"))
+                if rate is None:
+                    return {**entry_base, "status": "error", "error": "تعذر تحويل العملة", "value_in_target": 0.0}
+                unit_target = q["price"] * rate
+                return {
+                    **entry_base,
+                    "price_usd": q["price"],
+                    "unit_price_in_target": round(unit_target, 4),
+                    "value_in_target": round(amount * unit_target, 2),
+                    "status": "ok",
+                }
+
+            if kind == "casablanca":
+                q = await casa_price(sym)
+                if not q:
+                    return {**entry_base, "status": "error", "error": f"سهم الدار البيضاء غير موجود: {sym}", "value_in_target": 0.0}
+                rate = await _rate_to_target("MAD")
+                unit_target = q["price"] * (rate or 1.0)
+                return {
+                    **entry_base,
+                    "price_mad": q["price"],
+                    "unit_price_in_target": round(unit_target, 4),
+                    "value_in_target": round(amount * unit_target, 2),
+                    "status": "ok",
+                }
+
+            if kind == "stock":
+                q = await stock_price(sym)
+                if not q:
+                    return {**entry_base, "status": "error", "error": f"سهم غير موجود: {sym}", "value_in_target": 0.0}
+                src_cur = q.get("currency", "USD")
+                rate = await _rate_to_target(src_cur)
+                if rate is None:
+                    return {**entry_base, "status": "error", "error": f"تعذر تحويل {src_cur}", "value_in_target": 0.0}
+                unit_target = q["price"] * rate
+                return {
+                    **entry_base,
+                    "stock_currency": src_cur,
+                    "price_native": q["price"],
+                    "unit_price_in_target": round(unit_target, 4),
+                    "value_in_target": round(amount * unit_target, 2),
+                    "status": "ok",
+                }
+
+            return {**entry_base, "status": "error", "error": f"نوع أصل غير مدعوم: {kind}", "value_in_target": 0.0}
+        except Exception as exc:
+            return {**entry_base, "status": "error", "error": str(exc), "value_in_target": 0.0}
+
+    breakdown = await asyncio.gather(*[_eval_item(it) for it in items])
+    total = round(sum(b.get("value_in_target", 0.0) for b in breakdown), 2)
+    errors_count = sum(1 for b in breakdown if b.get("status") != "ok")
+    return {
+        "target_currency": target,
+        "total_value": total,
+        "count": len(breakdown),
+        "errors_count": errors_count,
+        "breakdown": list(breakdown),
+        "calculated_at": datetime.utcnow().isoformat(),
+    }
+
 

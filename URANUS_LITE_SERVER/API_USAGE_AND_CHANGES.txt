@@ -1,0 +1,292 @@
+================================================================================
+URANUS MARKETS LITE API — v1.2.0
+ملف التغييرات ودليل استخدام الـ API الكامل (مُحسَّن لتطبيق أندرويد لتتبع النفقات)
+================================================================================
+
+الرابط الرئيسي عند النشر على Vercel:
+  https://uranus-lite.vercel.app
+
+رابط التوثيق التفاعلي (Swagger UI):
+  https://uranus-lite.vercel.app/docs
+
+التشغيل المحلي:
+  http://localhost:8001
+
+
+================================================================================
+القسم الأول: كل التغييرات في الإصدار v1.2.0 (مقارنة بالإصدار v1.1.0)
+================================================================================
+
+1. إصلاح أسعار الـ 6 عملات رقمية التي كانت ترجع 0.0 في /crypto/top50:
+   - المشكلة السابقة: العملات KAS, STX, TAO, RUNE, BEAM, PENDLE غير مدرجة
+     في api.binance.us (المستعمل على خوادم أمريكا في Vercel)، فكانت تظهر بسعر 0.0.
+   - الإصلاح: إضافة احتياط مزدوج تلقائي عبر KuCoin (allTickers) ثم CoinGecko
+     (batch simple/price) في /crypto/top50 و /crypto/price/{symbol}.
+   - النتيجة: الـ 50 عملة كلها ترجع بأسعار حية حقيقية (0 أصفار).
+
+2. إصلاح سعر الفضة الحقيقي وإضافة دعم أي عملة للمعادن (/metals):
+   - المشكلة السابقة: الفضة كانت ترجع قيمة ثابتة 32.50 بسبب عدم وجود XAGUSDT
+     على Binance US.
+   - الإصلاح: جلب السعر الحي لعقود الفضة من Yahoo Finance (SI=F)، وإضافة
+     GC=F كاحتياط للذهب بجانب PAXGUSDT.
+   - إضافة معامل ?currency=MAD (أو EUR, USD, SAR, CAD...) لنقاط النهاية:
+     /metals و /metals/gold و /metals/silver مع الإبقاء على حقول MAD القديمة
+     (unit_ounce_mad و usd_to_mad_rate) لضمان التوافق الخلفي الكامل.
+
+3. إضافة نقطة السعر اللحظي للأسهم العالمية (/stocks/price/{symbol}):
+   - كان يتوفر تاريخ الشموع والبحث فقط، وتمت إضافة GET /stocks/price/{symbol}
+     لجلب السعر اللحظي ونسبة التغير وعملة السهم (مثل AAPL, TSLA, MC.PA).
+
+4. دعم تغيير عملة الأساس في أسعار الصرف (/fx/rates):
+   - لم تعد مقيدة بالدرهم المغربي فقط؛ يمكنك الآن طلب:
+     GET /fx/rates?base=EUR  أو  GET /fx/rates/EUR
+     مع بقاء الافتراضي base=MAD.
+
+5. توحيد معاملات التحويل وتاريخ الصرف (from / to):
+   - نقاط النهاية /fx/convert و /fx/history أصبحت تقبل المعاملين القياسيين:
+     ?from=EUR&to=MAD
+     مع الإبقاء على ?from_c=EUR&to_c=MAD كبديل متوافق لا يكسر أي كود قديم.
+
+6. إضافة سعر الصرف التاريخي ليوم محدد (/fx/rate-on-date) — لتطبيق النفقات:
+   - مخصصة لتسجيل الفواتير والمصروفات بأثر رجعي حسب تاريخ كل فاتورة:
+     GET /fx/rate-on-date?from=USD&to=MAD&date=2026-10-15&amount=50
+   - في حال صادف التاريخ عطلة نهاية أسبوع أو يوم إغلاق للأسواق، يرجع السيرفر
+     تلقائياً إلى آخر يوم تداول سابق ويوضح ذلك في effective_date و is_exact_date.
+
+7. إضافة حزمة المزامنة الخفيفة للموبايل (/sync/rates) — للعمل أوفلاين:
+   - نقطة نهاية مضغوطة (~880 بايت فقط!) ترجع أسعار الـ 11 عملة + الذهب والفضة
+     مقومة بعملة المستخدم الأساسية (?base=MAD) لتخزينها محلياً في Room / SQLite
+     على أندرويد واستخدامها بدون إنترنت طوال اليوم.
+
+8. إضافة تقييم المحفظة وصافي الثروة بدون تخزين (POST /portfolio/value):
+   - تحسب القيمة الإجمالية لكل أصول المستخدم (نقد بعملات متعددة، ذهب وفضة
+     بالجرام أو الأونصة والعيار، كريبتو، أسهم الدار البيضاء، وأسهم عالمية)
+     بالعملة الهدف المطلوبة في طلب واحد (Stateless — لا يُحفظ أي شيء بالسيرفر).
+
+
+================================================================================
+القسم الثاني: دليل استخدام نقاط النهاية (API Reference)
+================================================================================
+
+--------------------------------------------------------------------------------
+[1] الصحة والمعلومات العامة
+--------------------------------------------------------------------------------
+GET /health
+  التحقق من حالة السيرفر:
+  الرد: {"status": "ok"}
+
+GET /
+  يعرض اسم السيرفر، رقم الإصدار 1.2.0، وخريطة بجميع المسارات.
+
+
+--------------------------------------------------------------------------------
+[2] المزامنة السريعة لتطبيق الأندرويد (Offline Cache)
+--------------------------------------------------------------------------------
+GET /sync/rates?base=MAD
+  المعاملات:
+    - base (اختياري، الافتراضي: MAD): العملة الأساسية للمستخدم (MAD, EUR, USD...).
+  مثال الرد:
+  {
+    "base": "MAD",
+    "currencies": {
+      "MAD": {"rate": 1, "to_base": 1.0},
+      "USD": {"rate": 0.1015, "to_base": 9.8522},
+      "EUR": {"rate": 0.0917, "to_base": 10.9037}
+      ... (11 عملة)
+    },
+    "metals": {
+      "gold": {
+        "ounce_usd": 3922.39,
+        "ounce_base": 38644.1,
+        "gram_24k_base": 1242.5,
+        "gram_21k_base": 1087.19,
+        "gram_18k_base": 931.88,
+        "change_percent": 0.15
+      },
+      "silver": {
+        "ounce_usd": 49.87,
+        "ounce_base": 491.32,
+        "gram_999_base": 15.8,
+        "change_percent": -0.37
+      }
+    },
+    "updated_at": "2026-11-13T13:04:00",
+    "ttl_seconds": 300
+  }
+
+
+--------------------------------------------------------------------------------
+[3] العملات وأسعار الصرف
+--------------------------------------------------------------------------------
+العملات الـ 11 المدعومة في جدول الأسعار السريعة:
+  MAD, USD, EUR, GBP, SAR, AED, CAD, CHF, JPY, KWD, QAR
+  (التحويل المباشر /fx/convert يدعم أي عملة عالمية تقريباً مثل TRY, EGP, TND...).
+
+1) جدول الأسعار مقابل عملة الأساس:
+   GET /fx/rates?base=MAD
+   GET /fx/rates/EUR
+
+2) تحويل مبلغ بين عملتين:
+   GET /fx/convert?from=EUR&to=MAD&amount=100
+   (متوافق أيضاً مع: ?from_c=EUR&to_c=MAD&amount=100)
+   الرد:
+   {"from": "EUR", "to": "MAD", "amount": 100.0, "rate": 10.9037, "result": 1090.372}
+
+3) سعر الصرف في تاريخ محدد (لتسجيل الفواتير القديمة):
+   GET /fx/rate-on-date?from=USD&to=MAD&date=2026-10-15&amount=50
+   المعاملات:
+     - date (مطلوب): YYYY-MM-DD
+     - from / from_c (افتراضي USD)
+     - to / to_c (افتراضي MAD)
+     - amount (افتراضي 1.0)
+   الرد:
+   {
+     "from": "USD",
+     "to": "MAD",
+     "requested_date": "2026-10-15",
+     "effective_date": "2026-10-15",
+     "amount": 50.0,
+     "rate": 9.493305,
+     "result": 474.6652,
+     "is_exact_date": true
+   }
+
+4) شارت تطور سعر صرف زوج عملات:
+   GET /fx/history?from=EUR&to=MAD&range=1mo&interval=1d
+   قيم range المتاحة: 5d, 1mo, 3mo, 6mo, 1y, 5y
+   قيم interval المتاحة: 1d, 1wk, 1mo
+
+
+--------------------------------------------------------------------------------
+[4] الذهب والفضة والمعادن النفيسة
+--------------------------------------------------------------------------------
+1) الذهب والفضة معاً:
+   GET /metals?currency=MAD
+   GET /metals?currency=EUR
+
+2) الذهب فقط (أونصة + جرام عيار 24 و 21 و 18):
+   GET /metals/gold?currency=MAD
+
+3) الفضة فقط (أونصة + جرام عيار 999):
+   GET /metals/silver?currency=MAD
+
+4) شارت تاريخ أسعار الذهب أو الفضة:
+   GET /metals/history/gold?range=1mo&interval=1d
+   GET /metals/history/silver?range=3mo&interval=1d
+
+
+--------------------------------------------------------------------------------
+[5] تقييم المحفظة وصافي الثروة (Stateless Net Worth Calculator)
+--------------------------------------------------------------------------------
+POST /portfolio/value
+Content-Type: application/json
+
+مثال جسم الطلب (Request Body):
+{
+  "target_currency": "MAD",
+  "items": [
+    {"type": "currency",   "symbol": "EUR",  "amount": 500,  "label": "كاش يورو"},
+    {"type": "metal",      "symbol": "gold", "unit": "gram", "karat": "21k", "amount": 15, "label": "ذهب عيار 21"},
+    {"type": "crypto",     "symbol": "BTC",  "amount": 0.05},
+    {"type": "stock",      "symbol": "AAPL", "amount": 2},
+    {"type": "casablanca", "symbol": "ATW",  "amount": 10}
+  ]
+}
+
+الأنواع المدعومة في items:
+  - currency   : symbol = رمز العملة (EUR, USD, SAR...) | amount = المبلغ
+  - metal      : symbol = gold أو silver | unit = gram أو ounce | karat = 24k, 21k, 18k, pure_999 | amount = الوزن
+  - crypto     : symbol = BTC, ETH, SOL, KAS... | amount = الكمية
+  - stock      : symbol = AAPL, TSLA, MC.PA... | amount = عدد الأسهم
+  - casablanca : symbol = ATW, IAM, BCP... | amount = عدد الأسهم
+
+ملاحظة أمان: السيرفر يحسب النتيجة ويرجعها فوراً ولا يخزن أرصدتك في أي قاعدة بيانات.
+وإذا أخطأ المستخدم في رمز واحد، يحسب السيرفر باقي الأصول بشكل طبيعي ويضع
+"status": "error" للعنصر المخطئ فقط مع errors_count.
+
+
+--------------------------------------------------------------------------------
+[6] العملات المشفرة (Top 50 Crypto)
+--------------------------------------------------------------------------------
+GET /crypto/top50                  -> قائمة أفضل 50 عملة بالأسعار ونسب التغير
+GET /crypto/price/{symbol}         -> السعر اللحظي لعملة (مثل BTC, SOL, KAS)
+GET /crypto/history/{symbol}?interval=1d&limit=30 -> شموع تاريخية للشارت
+
+
+--------------------------------------------------------------------------------
+[7] الأسهم والبورصات والمؤشرات
+--------------------------------------------------------------------------------
+GET /stocks/price/{symbol}         -> السعر اللحظي لأي سهم عالمي (مثل AAPL, MSFT, MC.PA)
+GET /stocks/history/{symbol}?range=1mo&interval=1d -> شموع تاريخية للسهم
+GET /exchanges                     -> قائمة الـ 10 بورصات المتوفرة
+GET /exchange/{slug}/stocks        -> أسهم بورصة محددة (مثل casablanca, nasdaq, saudi)
+GET /casablanca/stocks             -> أسهم بورصة الدار البيضاء مع مؤشر MASI
+GET /casablanca/price/{symbol}     -> سعر سهم في بورصة الدار البيضاء (مثل ATW, IAM)
+GET /casablanca/history/{symbol}?days=30 -> شارت لسهم كازا أو MASI
+GET /indices                       -> أسعار المؤشرات الـ 12 الكبرى
+GET /indices/history/{slug}?range=1mo&interval=1d -> شارت مؤشر
+
+
+--------------------------------------------------------------------------------
+[8] محرك البحث
+--------------------------------------------------------------------------------
+GET /search?q={query}              -> بحث موحد في كل الأسواق (كريبتو + كازا + أسهم عالمية + عملات + معادن)
+GET /crypto/search?q={query}       -> بحث داخل الكريبتو
+GET /casablanca/search?q={query}   -> بحث داخل بورصة الدار البيضاء
+GET /stocks/search?q={query}       -> بحث داخل الأسهم الأمريكية والعالمية
+
+
+================================================================================
+القسم الثالث: طريقة دمج الـ API في تطبيق الأندرويد (Kotlin / Jetpack Compose)
+================================================================================
+
+1. مبدأ العمل الموصى به لتطبيق تتبع النفقات:
+   - تخزن المصروفات والحسابات والمحافظ محلياً داخل هاتف المستخدم عبر Room DB
+     (لا ترسل قاعدة بيانات المستخدم إلى السيرفر).
+   - عند فتح التطبيق (أو كل 15-60 دقيقة عبر WorkManager):
+     يطلب التطبيق GET /sync/rates?base=<عملة المستخدم الأساسية>
+     ويحفظ النتيجة (~1 KB) محلياً في DataStore / Room.
+   - عند إضافة مصروف اليوم بعملة أجنبية (مثلاً 20 EUR وحسابك MAD):
+     التطبيق يحول المبلغ محلياً فوراً بالضرب في currencies["EUR"]["to_base"]
+     من الكاش، حتى لو كان الهاتف بدون إنترنت (Airplane Mode)!
+   - عند إضافة فاتورة قديمة بتاريخ سابق:
+     يستدعي التطبيق GET /fx/rate-on-date?from=EUR&to=MAD&date=2026-10-15&amount=20
+     ليحفظ السعر التاريخي الفعلي لذلك اليوم مع المعاملة.
+   - في شاشة "صافي الثروة" (Net Worth) إذا كان لدى المستخدم ذهب أو أسهم أو كريبتو:
+     يرسل قائمة الأصول الحالية لـ POST /portfolio/value للحصول على التقييم الحي
+     مقوماً بعملته الأساسية.
+
+2. مثال واجهة Retrofit في أندرويد (Kotlin):
+
+   interface UranusLiteApi {
+       @GET("sync/rates")
+       suspend fun getSyncRates(@Query("base") base: String = "MAD"): SyncRatesResponse
+
+       @GET("fx/convert")
+       suspend fun convertFx(
+           @Query("from") from: String,
+           @Query("to") to: String,
+           @Query("amount") amount: Double
+       ): FxConvertResponse
+
+       @GET("fx/rate-on-date")
+       suspend fun getHistoricalRate(
+           @Query("from") from: String,
+           @Query("to") to: String,
+           @Query("date") date: String,
+           @Query("amount") amount: Double = 1.0
+       ): HistoricalRateResponse
+
+       @GET("metals")
+       suspend fun getMetals(@Query("currency") currency: String = "MAD"): MetalsResponse
+
+       @GET("stocks/price/{symbol}")
+       suspend fun getStockPrice(@Path("symbol") symbol: String): StockPriceResponse
+
+       @POST("portfolio/value")
+       suspend fun evaluatePortfolio(@Body body: PortfolioRequest): PortfolioResponse
+
+       @GET("search")
+       suspend fun searchAll(@Query("q") query: String): SearchResponse
+   }
+================================================================================
